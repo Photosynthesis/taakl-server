@@ -27,12 +27,6 @@ $uri = $_SERVER['REQUEST_URI'];
 // Remove query string from URI
 $uri = parse_url($uri, PHP_URL_PATH);
 
-// Remove base path if present (adjust this based on your deployment)
-$basePath = '/taakl-server';
-if (strpos($uri, $basePath) === 0) {
-    $uri = substr($uri, strlen($basePath));
-}
-
 // Normalize URI
 $uri = '/' . trim($uri, '/');
 

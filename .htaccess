@@ -4,7 +4,7 @@
 RewriteEngine On
 
 # Set base path (adjust if deployed in a subdirectory)
-RewriteBase /taakl-server/
+RewriteBase /
 
 # Don't rewrite requests for existing files or directories
 RewriteCond %{REQUEST_FILENAME} !-f
