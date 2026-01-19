@@ -1,0 +1,20 @@
+# Local configuration (contains credentials)
+config.local.php
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Composer (if added later)
+vendor/
+composer.lock

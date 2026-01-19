@@ -1,0 +1,37 @@
+# Taakl Server - Apache Configuration
+
+# Enable rewrite engine
+RewriteEngine On
+
+# Set base path (adjust if deployed in a subdirectory)
+RewriteBase /taakl-server/
+
+# Don't rewrite requests for existing files or directories
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+
+# Route all requests to index.php
+RewriteRule ^(.*)$ index.php [QSA,L]
+
+# Security headers
+<IfModule mod_headers.c>
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "DENY"
+    Header set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+# Prevent directory listing
+Options -Indexes
+
+# Deny access to sensitive files
+<FilesMatch "^(config\.local\.php|\.git|\.env)">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# PHP settings (if mod_php)
+<IfModule mod_php.c>
+    php_value upload_max_filesize 10M
+    php_value post_max_size 10M
+    php_value max_execution_time 60
+</IfModule>
