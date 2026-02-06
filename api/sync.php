@@ -23,6 +23,7 @@ function handleSync(): void {
 /**
  * POST /api/sync/full
  * Full sync upload - receives complete client data
+ * Supports both v1 (clients/projects/tasks) and v2 (nodes/rootOrder) formats
  */
 function handleFullSyncUpload(): void {
     $user = Auth::requireAuth();
@@ -31,8 +32,16 @@ function handleFullSyncUpload(): void {
     // Support both wrapped and unwrapped data formats
     $ttData = $data['ttData'] ?? $data;
 
-    if (empty($ttData) || !isset($ttData['clients'])) {
-        Response::error('Invalid data format - missing clients', 400);
+    if (empty($ttData)) {
+        Response::error('Invalid data format - empty data', 400);
+    }
+
+    // Validate: must have either v1 clients OR v2 nodes (or both)
+    $hasV1Data = isset($ttData['clients']) && !empty($ttData['clients']);
+    $hasV2Data = isset($ttData['nodes']) && !empty($ttData['nodes']);
+
+    if (!$hasV1Data && !$hasV2Data) {
+        Response::error('Invalid data format - missing clients or nodes', 400);
     }
 
     $sync = new Sync($user['id'], $user['uuid']);

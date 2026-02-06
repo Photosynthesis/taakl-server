@@ -90,6 +90,11 @@ class Sync {
                 return $this->insertTask($uuid, $data, $parentUuid);
             case 'session':
                 return $this->insertSession($uuid, $data, $parentUuid);
+            // v2 node types
+            case 'node':
+                return $this->insertNode($uuid, $data, $parentUuid);
+            case 'node_session':
+                return $this->insertNodeSession($uuid, $data, $parentUuid);
             default:
                 return false;
         }
@@ -108,6 +113,11 @@ class Sync {
                 return $this->updateTask($uuid, $data, $timestamp);
             case 'session':
                 return $this->updateSession($uuid, $data, $timestamp);
+            // v2 node types
+            case 'node':
+                return $this->updateNodeRecord($uuid, $data, $timestamp);
+            case 'node_session':
+                return $this->updateNodeSession($uuid, $data, $timestamp);
             default:
                 return false;
         }
@@ -133,10 +143,18 @@ class Sync {
             return false;
         }
 
-        Database::execute(
-            "UPDATE {$table} SET deleted_at = ? WHERE uuid = ?",
-            [$timestamp, $uuid]
-        );
+        // For v2 node types, use different query (uuid is unique per user)
+        if ($type === 'node' || $type === 'node_session') {
+            Database::execute(
+                "UPDATE {$table} SET deleted_at = ? WHERE id = ?",
+                [$timestamp, $existing['id']]
+            );
+        } else {
+            Database::execute(
+                "UPDATE {$table} SET deleted_at = ? WHERE uuid = ?",
+                [$timestamp, $uuid]
+            );
+        }
 
         return true;
     }
@@ -375,6 +393,222 @@ class Sync {
         return true;
     }
 
+    // ==================== v2 Node Methods ====================
+
+    /**
+     * Insert a node (v2 structure)
+     */
+    private function insertNode(string $uuid, array $data, ?string $parentUuid): bool {
+        // Check if already exists
+        $existing = Database::queryOne(
+            "SELECT id FROM nodes WHERE uuid = ? AND user_id = ?",
+            [$uuid, $this->userId]
+        );
+
+        if ($existing) {
+            return false;
+        }
+
+        Database::insert('nodes', [
+            'uuid' => $uuid,
+            'user_id' => $this->userId,
+            'parent_uuid' => $parentUuid,
+            'name' => $data['name'] ?? 'Unnamed',
+            'node_type' => $data['type'] ?? 'task',
+            'child_order' => isset($data['childOrder']) ? json_encode($data['childOrder']) : '[]',
+            'collapsed' => $data['collapsed'] ?? 0,
+            'status' => $data['status'] ?? 'new',
+            'priority' => $data['priority'] ?? 3,
+            'billable' => $data['billable'] ?? 1,
+            'estimate' => $data['estimate'] ?? null,
+            'due' => $data['due'] ?: null,
+            'starred' => $data['starred'] ?? 0,
+            'notes' => $data['notes'] ?? null,
+            'meta' => isset($data['meta']) ? json_encode($data['meta']) : null
+        ]);
+
+        // Update rootOrder if this is a root node
+        if ($parentUuid === null) {
+            $this->addToRootOrder($uuid);
+        }
+
+        return true;
+    }
+
+    /**
+     * Insert a node session (v2 structure)
+     */
+    private function insertNodeSession(string $uuid, array $data, ?string $nodeUuid): bool {
+        if (!$nodeUuid) {
+            return false;
+        }
+
+        $node = $this->getNodeByUuid($nodeUuid);
+        if (!$node) {
+            return false;
+        }
+
+        $existing = Database::queryOne(
+            "SELECT id FROM node_sessions WHERE uuid = ? AND node_id = ?",
+            [$uuid, $node['id']]
+        );
+
+        if ($existing) {
+            return false;
+        }
+
+        Database::insert('node_sessions', [
+            'uuid' => $uuid,
+            'node_id' => $node['id'],
+            'start_time' => $data['start_time'] ?? date('Y-m-d H:i:s'),
+            'end_time' => $data['end_time'] ?? null,
+            'notes' => $data['notes'] ?? null,
+            'meta' => isset($data['meta']) ? json_encode($data['meta']) : null
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Update a node (v2 structure)
+     */
+    private function updateNodeRecord(string $uuid, array $data, string $timestamp): bool {
+        $existing = $this->getNodeByUuid($uuid);
+
+        if (!$existing || ($existing['updated_at'] > $timestamp && $existing['deleted_at'] === null)) {
+            return false;
+        }
+
+        $updates = [];
+        if (isset($data['name'])) $updates['name'] = $data['name'];
+        if (isset($data['type'])) $updates['node_type'] = $data['type'];
+        if (isset($data['parentId'])) $updates['parent_uuid'] = $data['parentId'];
+        if (isset($data['childOrder'])) $updates['child_order'] = json_encode($data['childOrder']);
+        if (isset($data['collapsed'])) $updates['collapsed'] = $data['collapsed'];
+        if (isset($data['status'])) $updates['status'] = $data['status'];
+        if (isset($data['priority'])) $updates['priority'] = $data['priority'];
+        if (isset($data['billable'])) $updates['billable'] = $data['billable'];
+        if (isset($data['estimate'])) $updates['estimate'] = $data['estimate'];
+        if (isset($data['due'])) $updates['due'] = $data['due'] ?: null;
+        if (isset($data['starred'])) $updates['starred'] = $data['starred'];
+        if (isset($data['notes'])) $updates['notes'] = $data['notes'];
+        if (isset($data['meta'])) $updates['meta'] = json_encode($data['meta']);
+
+        if (empty($updates)) {
+            return true;
+        }
+
+        Database::update('nodes', $updates, ['id' => $existing['id']]);
+        return true;
+    }
+
+    /**
+     * Update a node session (v2 structure)
+     */
+    private function updateNodeSession(string $uuid, array $data, string $timestamp): bool {
+        $existing = $this->getNodeSessionByUuid($uuid);
+
+        if (!$existing || ($existing['updated_at'] > $timestamp && $existing['deleted_at'] === null)) {
+            return false;
+        }
+
+        $updates = [];
+        if (isset($data['start_time'])) $updates['start_time'] = $data['start_time'];
+        if (isset($data['end_time'])) $updates['end_time'] = $data['end_time'];
+        if (isset($data['notes'])) $updates['notes'] = $data['notes'];
+        if (isset($data['meta'])) $updates['meta'] = json_encode($data['meta']);
+
+        if (empty($updates)) {
+            return true;
+        }
+
+        Database::update('node_sessions', $updates, ['id' => $existing['id']]);
+        return true;
+    }
+
+    /**
+     * Get node by UUID (v2 structure)
+     */
+    private function getNodeByUuid(string $uuid): ?array {
+        return Database::queryOne(
+            "SELECT * FROM nodes WHERE uuid = ? AND user_id = ?",
+            [$uuid, $this->userId]
+        );
+    }
+
+    /**
+     * Get node session by UUID (v2 structure)
+     */
+    private function getNodeSessionByUuid(string $uuid): ?array {
+        return Database::queryOne(
+            "SELECT ns.* FROM node_sessions ns
+             JOIN nodes n ON ns.node_id = n.id
+             WHERE ns.uuid = ? AND n.user_id = ?",
+            [$uuid, $this->userId]
+        );
+    }
+
+    /**
+     * Get or create user data meta
+     */
+    private function getUserDataMeta(): array {
+        $meta = Database::queryOne(
+            "SELECT * FROM user_data_meta WHERE user_id = ?",
+            [$this->userId]
+        );
+
+        if (!$meta) {
+            Database::insert('user_data_meta', [
+                'user_id' => $this->userId,
+                'data_version' => 2,
+                'root_order' => '[]'
+            ]);
+            return [
+                'data_version' => 2,
+                'root_order' => []
+            ];
+        }
+
+        return [
+            'data_version' => (int) $meta['data_version'],
+            'root_order' => json_decode($meta['root_order'] ?? '[]', true) ?: []
+        ];
+    }
+
+    /**
+     * Save user data meta
+     */
+    private function saveUserDataMeta(int $dataVersion, array $rootOrder): void {
+        $existing = Database::queryOne(
+            "SELECT id FROM user_data_meta WHERE user_id = ?",
+            [$this->userId]
+        );
+
+        $data = [
+            'data_version' => $dataVersion,
+            'root_order' => json_encode($rootOrder)
+        ];
+
+        if ($existing) {
+            Database::update('user_data_meta', $data, ['id' => $existing['id']]);
+        } else {
+            Database::insert('user_data_meta', array_merge($data, ['user_id' => $this->userId]));
+        }
+    }
+
+    /**
+     * Add node to root order
+     */
+    private function addToRootOrder(string $uuid): void {
+        $meta = $this->getUserDataMeta();
+        if (!in_array($uuid, $meta['root_order'])) {
+            $meta['root_order'][] = $uuid;
+            $this->saveUserDataMeta($meta['data_version'], $meta['root_order']);
+        }
+    }
+
+    // ==================== End v2 Node Methods ====================
+
     /**
      * Get changes since a given time
      */
@@ -456,6 +690,40 @@ class Sync {
             ];
         }
 
+        // Get node changes (v2)
+        $nodes = Database::query(
+            "SELECT * FROM nodes WHERE user_id = ? AND updated_at > ?",
+            [$this->userId, $since]
+        );
+
+        foreach ($nodes as $node) {
+            $changes[] = [
+                'action' => $node['deleted_at'] ? 'delete' : 'update',
+                'type' => 'node',
+                'uuid' => $node['uuid'],
+                'parentUuid' => $node['parent_uuid'],
+                'data' => $this->formatNodeData($node)
+            ];
+        }
+
+        // Get node session changes (v2)
+        $nodeSessions = Database::query(
+            "SELECT ns.*, n.uuid as node_uuid FROM node_sessions ns
+             JOIN nodes n ON ns.node_id = n.id
+             WHERE n.user_id = ? AND ns.updated_at > ?",
+            [$this->userId, $since]
+        );
+
+        foreach ($nodeSessions as $nodeSession) {
+            $changes[] = [
+                'action' => $nodeSession['deleted_at'] ? 'delete' : 'update',
+                'type' => 'node_session',
+                'uuid' => $nodeSession['uuid'],
+                'parentUuid' => $nodeSession['node_uuid'],
+                'data' => $this->formatNodeSessionData($nodeSession)
+            ];
+        }
+
         return $changes;
     }
 
@@ -463,12 +731,19 @@ class Sync {
      * Get full data export (for full sync)
      */
     public function getFullData(): array {
+        // Get user data meta (v2 info)
+        $meta = $this->getUserDataMeta();
+
         $data = [
+            'dataVersion' => $meta['data_version'],
             'userKey' => $this->userUuid,
             'clients' => [],
+            'nodes' => [],
+            'rootOrder' => $meta['root_order'],
             'settings' => $this->getSettings()
         ];
 
+        // === Legacy v1 data (clients/projects/tasks) ===
         $clients = Database::query(
             "SELECT * FROM clients WHERE user_id = ? AND deleted_at IS NULL",
             [$this->userId]
@@ -535,6 +810,52 @@ class Sync {
             $data['clients'][$client['uuid']] = $clientData;
         }
 
+        // === v2 Node data ===
+        $nodes = Database::query(
+            "SELECT * FROM nodes WHERE user_id = ? AND deleted_at IS NULL",
+            [$this->userId]
+        );
+
+        foreach ($nodes as $node) {
+            $nodeData = [
+                'id' => $node['uuid'],
+                'name' => $node['name'],
+                'type' => $node['node_type'],
+                'parentId' => $node['parent_uuid'],
+                'childOrder' => json_decode($node['child_order'] ?? '[]', true) ?: [],
+                'collapsed' => (bool) $node['collapsed']
+            ];
+
+            // Include task-specific fields
+            if ($node['node_type'] === 'task') {
+                $nodeData['status'] = $node['status'];
+                $nodeData['priority'] = (string) $node['priority'];
+                $nodeData['billable'] = (string) $node['billable'];
+                $nodeData['estimate'] = $node['estimate'];
+                $nodeData['due'] = $node['due'];
+                $nodeData['starred'] = (string) $node['starred'];
+                $nodeData['notes'] = $node['notes'];
+                $nodeData['sessions'] = [];
+
+                // Get node sessions
+                $nodeSessions = Database::query(
+                    "SELECT * FROM node_sessions WHERE node_id = ? AND deleted_at IS NULL",
+                    [$node['id']]
+                );
+
+                foreach ($nodeSessions as $session) {
+                    $nodeData['sessions'][$session['uuid']] = [
+                        'id' => $session['uuid'],
+                        'start_time' => $session['start_time'],
+                        'end_time' => $session['end_time'],
+                        'notes' => $session['notes']
+                    ];
+                }
+            }
+
+            $data['nodes'][$node['uuid']] = $nodeData;
+        }
+
         return $data;
     }
 
@@ -542,12 +863,12 @@ class Sync {
      * Import full data (for full sync upload)
      */
     public function importFullData(array $data): array {
-        $stats = ['clients' => 0, 'projects' => 0, 'tasks' => 0, 'sessions' => 0];
+        $stats = ['clients' => 0, 'projects' => 0, 'tasks' => 0, 'sessions' => 0, 'nodes' => 0, 'node_sessions' => 0];
 
         Database::beginTransaction();
 
         try {
-            // Process clients
+            // === Process legacy v1 clients ===
             $clients = $data['clients'] ?? [];
             foreach ($clients as $clientUuid => $clientData) {
                 $this->upsertClient($clientUuid, $clientData);
@@ -574,6 +895,25 @@ class Sync {
                     }
                 }
             }
+
+            // === Process v2 nodes ===
+            $nodes = $data['nodes'] ?? [];
+            foreach ($nodes as $nodeUuid => $nodeData) {
+                $this->upsertNode($nodeUuid, $nodeData);
+                $stats['nodes']++;
+
+                // Process node sessions
+                $sessions = $nodeData['sessions'] ?? [];
+                foreach ($sessions as $sessionUuid => $sessionData) {
+                    $this->upsertNodeSession($sessionUuid, $sessionData, $nodeUuid);
+                    $stats['node_sessions']++;
+                }
+            }
+
+            // === Process rootOrder and dataVersion ===
+            $dataVersion = $data['dataVersion'] ?? 2;
+            $rootOrder = $data['rootOrder'] ?? [];
+            $this->saveUserDataMeta($dataVersion, $rootOrder);
 
             // Process settings
             if (isset($data['settings'])) {
@@ -716,6 +1056,73 @@ class Sync {
     }
 
     /**
+     * Upsert a node (v2 structure)
+     */
+    private function upsertNode(string $uuid, array $data): void {
+        $existing = Database::queryOne(
+            "SELECT id FROM nodes WHERE uuid = ? AND user_id = ?",
+            [$uuid, $this->userId]
+        );
+
+        $fields = [
+            'name' => $data['name'] ?? 'Unnamed',
+            'node_type' => $data['type'] ?? 'task',
+            'parent_uuid' => $data['parentId'] ?? null,
+            'child_order' => isset($data['childOrder']) ? json_encode($data['childOrder']) : '[]',
+            'collapsed' => $data['collapsed'] ?? 0,
+            'status' => $data['status'] ?? 'new',
+            'priority' => $data['priority'] ?? 3,
+            'billable' => $data['billable'] ?? 1,
+            'estimate' => $data['estimate'] ?? null,
+            'due' => ($data['due'] ?? null) ?: null,
+            'starred' => $data['starred'] ?? 0,
+            'notes' => $data['notes'] ?? null,
+            'deleted_at' => null
+        ];
+
+        if ($existing) {
+            Database::update('nodes', $fields, ['id' => $existing['id']]);
+        } else {
+            Database::insert('nodes', array_merge($fields, [
+                'uuid' => $uuid,
+                'user_id' => $this->userId
+            ]));
+        }
+    }
+
+    /**
+     * Upsert a node session (v2 structure)
+     */
+    private function upsertNodeSession(string $uuid, array $data, string $nodeUuid): void {
+        $node = $this->getNodeByUuid($nodeUuid);
+
+        if (!$node) {
+            return;
+        }
+
+        $existing = Database::queryOne(
+            "SELECT id FROM node_sessions WHERE uuid = ? AND node_id = ?",
+            [$uuid, $node['id']]
+        );
+
+        $fields = [
+            'start_time' => $data['start_time'] ?? date('Y-m-d H:i:s'),
+            'end_time' => $data['end_time'] ?? null,
+            'notes' => $data['notes'] ?? null,
+            'deleted_at' => null
+        ];
+
+        if ($existing) {
+            Database::update('node_sessions', $fields, ['id' => $existing['id']]);
+        } else {
+            Database::insert('node_sessions', array_merge($fields, [
+                'uuid' => $uuid,
+                'node_id' => $node['id']
+            ]));
+        }
+    }
+
+    /**
      * Get user settings
      */
     public function getSettings(): array {
@@ -767,6 +1174,8 @@ class Sync {
             'project' => 'projects',
             'task' => 'tasks',
             'session' => 'sessions',
+            'node' => 'nodes',
+            'node_session' => 'node_sessions',
             default => null
         };
     }
@@ -780,6 +1189,8 @@ class Sync {
             'project' => $this->getProjectByUuid($uuid),
             'task' => $this->getTaskByUuid($uuid),
             'session' => $this->getSessionByUuid($uuid),
+            'node' => $this->getNodeByUuid($uuid),
+            'node_session' => $this->getNodeSessionByUuid($uuid),
             default => null
         };
     }
@@ -843,6 +1254,39 @@ class Sync {
     }
 
     private function formatSessionData(array $session): array {
+        return [
+            'id' => $session['uuid'],
+            'start_time' => $session['start_time'],
+            'end_time' => $session['end_time'],
+            'notes' => $session['notes']
+        ];
+    }
+
+    private function formatNodeData(array $node): array {
+        $data = [
+            'id' => $node['uuid'],
+            'name' => $node['name'],
+            'type' => $node['node_type'],
+            'parentId' => $node['parent_uuid'],
+            'childOrder' => json_decode($node['child_order'] ?? '[]', true) ?: [],
+            'collapsed' => (bool) $node['collapsed']
+        ];
+
+        // Include task-specific fields
+        if ($node['node_type'] === 'task') {
+            $data['status'] = $node['status'];
+            $data['priority'] = (string) $node['priority'];
+            $data['billable'] = (string) $node['billable'];
+            $data['estimate'] = $node['estimate'];
+            $data['due'] = $node['due'];
+            $data['starred'] = (string) $node['starred'];
+            $data['notes'] = $node['notes'];
+        }
+
+        return $data;
+    }
+
+    private function formatNodeSessionData(array $session): array {
         return [
             'id' => $session['uuid'],
             'start_time' => $session['start_time'],
