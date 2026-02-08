@@ -43,9 +43,13 @@ class Sync {
             throw $e;
         }
 
+        // Get current rootOrder to return to client
+        $meta = $this->getUserDataMeta();
+
         return [
             'serverTime' => date('Y-m-d H:i:s'),
             'changes' => $serverChanges,
+            'rootOrder' => $meta['root_order'],
             'stats' => array_merge($stats, ['returned' => count($serverChanges)])
         ];
     }
@@ -479,6 +483,9 @@ class Sync {
             return false;
         }
 
+        $oldParentUuid = $existing['parent_uuid'];
+        $newParentUuid = $data['parentId'] ?? $oldParentUuid;
+
         $updates = [];
         if (isset($data['name'])) $updates['name'] = $data['name'];
         if (isset($data['type'])) $updates['node_type'] = $data['type'];
@@ -499,6 +506,18 @@ class Sync {
         }
 
         Database::update('nodes', $updates, ['id' => $existing['id']]);
+
+        // Update rootOrder if parentId changed to/from null
+        if ($oldParentUuid !== $newParentUuid) {
+            if ($oldParentUuid === null && $newParentUuid !== null) {
+                // Moved FROM root TO a parent - remove from rootOrder
+                $this->removeFromRootOrder($uuid);
+            } else if ($oldParentUuid !== null && $newParentUuid === null) {
+                // Moved FROM a parent TO root - add to rootOrder
+                $this->addToRootOrder($uuid);
+            }
+        }
+
         return true;
     }
 
@@ -603,6 +622,18 @@ class Sync {
         $meta = $this->getUserDataMeta();
         if (!in_array($uuid, $meta['root_order'])) {
             $meta['root_order'][] = $uuid;
+            $this->saveUserDataMeta($meta['data_version'], $meta['root_order']);
+        }
+    }
+
+    /**
+     * Remove node from root order
+     */
+    private function removeFromRootOrder(string $uuid): void {
+        $meta = $this->getUserDataMeta();
+        $index = array_search($uuid, $meta['root_order']);
+        if ($index !== false) {
+            array_splice($meta['root_order'], $index, 1);
             $this->saveUserDataMeta($meta['data_version'], $meta['root_order']);
         }
     }
