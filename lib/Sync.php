@@ -428,6 +428,7 @@ class Sync {
             'due' => $data['due'] ?: null,
             'starred' => $data['starred'] ?? 0,
             'notes' => $data['notes'] ?? null,
+            'creation_date' => $data['creation_date'] ?? null,
             'meta' => isset($data['meta']) ? json_encode($data['meta']) : null
         ]);
 
@@ -499,6 +500,7 @@ class Sync {
         if (isset($data['due'])) $updates['due'] = $data['due'] ?: null;
         if (isset($data['starred'])) $updates['starred'] = $data['starred'];
         if (isset($data['notes'])) $updates['notes'] = $data['notes'];
+        if (isset($data['creation_date'])) $updates['creation_date'] = $data['creation_date'];
         if (isset($data['meta'])) $updates['meta'] = json_encode($data['meta']);
 
         if (empty($updates)) {
@@ -1108,6 +1110,7 @@ class Sync {
             'due' => ($data['due'] ?? null) ?: null,
             'starred' => $data['starred'] ?? 0,
             'notes' => $data['notes'] ?? null,
+            'creation_date' => $data['creation_date'] ?? null,
             'deleted_at' => null
         ];
 
@@ -1300,7 +1303,8 @@ class Sync {
             'type' => $node['node_type'],
             'parentId' => $node['parent_uuid'],
             'childOrder' => json_decode($node['child_order'] ?? '[]', true) ?: [],
-            'collapsed' => (bool) $node['collapsed']
+            'collapsed' => (bool) $node['collapsed'],
+            'creation_date' => $node['creation_date'] ?? null
         ];
 
         // Include task-specific fields
