@@ -6,9 +6,87 @@ class Sync {
     private int $userId;
     private string $userUuid;
 
+    /** Fields stored in dedicated DB columns (everything else goes into `meta` JSON). */
+    private static array $coreNodeFields = [
+        'name', 'type', 'parentId', 'childOrder', 'collapsed',
+        'status', 'priority', 'billable', 'estimate', 'due', 'starred',
+        'notes', 'creation_date'
+    ];
+
+    /** Fields that are never stored in meta (structural / handled separately). */
+    private static array $skipFields = ['id', 'sessions'];
+
     public function __construct(int $userId, string $userUuid) {
         $this->userId = $userId;
         $this->userUuid = $userUuid;
+    }
+
+    /**
+     * Split incoming node data into core column updates and extra meta fields.
+     * Returns ['core' => [...], 'meta' => [...]]
+     */
+    private static function separateNodeFields(array $data): array {
+        $core = [];
+        $meta = [];
+        foreach ($data as $key => $value) {
+            if (in_array($key, self::$skipFields, true)) {
+                continue;
+            }
+            if (in_array($key, self::$coreNodeFields, true)) {
+                $core[$key] = $value;
+            } else {
+                $meta[$key] = $value;
+            }
+        }
+        return ['core' => $core, 'meta' => $meta];
+    }
+
+    /**
+     * Build the column-level array for a core field set (maps camelCase to DB columns).
+     */
+    private static function coreToColumns(array $core, bool $isInsert = false): array {
+        $cols = [];
+        if ($isInsert) {
+            $cols['name']          = $core['name'] ?? 'Unnamed';
+            $cols['node_type']     = $core['type'] ?? 'task';
+            $cols['child_order']   = isset($core['childOrder']) ? json_encode($core['childOrder']) : '[]';
+            $cols['collapsed']     = $core['collapsed'] ?? 0;
+            $cols['status']        = $core['status'] ?? 'new';
+            $cols['priority']      = $core['priority'] ?? 3;
+            $cols['billable']      = $core['billable'] ?? 1;
+            $cols['estimate']      = $core['estimate'] ?? null;
+            $cols['due']           = ($core['due'] ?? null) ?: null;
+            $cols['starred']       = $core['starred'] ?? 0;
+            $cols['notes']         = $core['notes'] ?? null;
+            $cols['creation_date'] = $core['creation_date'] ?? null;
+        } else {
+            if (isset($core['name']))          $cols['name']          = $core['name'];
+            if (isset($core['type']))          $cols['node_type']     = $core['type'];
+            if (isset($core['childOrder']))    $cols['child_order']   = json_encode($core['childOrder']);
+            if (isset($core['collapsed']))     $cols['collapsed']     = $core['collapsed'];
+            if (isset($core['status']))        $cols['status']        = $core['status'];
+            if (isset($core['priority']))      $cols['priority']      = $core['priority'];
+            if (isset($core['billable']))      $cols['billable']      = $core['billable'];
+            if (isset($core['estimate']))      $cols['estimate']      = $core['estimate'];
+            if (isset($core['due']))           $cols['due']           = $core['due'] ?: null;
+            if (isset($core['starred']))       $cols['starred']       = $core['starred'];
+            if (isset($core['notes']))         $cols['notes']         = $core['notes'];
+            if (isset($core['creation_date'])) $cols['creation_date'] = $core['creation_date'];
+        }
+        return $cols;
+    }
+
+    /**
+     * Merge new meta fields into an existing meta JSON string.
+     * Returns the merged JSON string.
+     */
+    private static function mergeMeta(?string $existingJson, array $newMeta): ?string {
+        if (empty($newMeta)) {
+            return $existingJson;
+        }
+        $existing = $existingJson ? (json_decode($existingJson, true) ?: []) : [];
+        $merged = array_merge($existing, $newMeta);
+        return json_encode($merged);
     }
 
     /**
@@ -400,37 +478,37 @@ class Sync {
     // ==================== v2 Node Methods ====================
 
     /**
-     * Insert a node (v2 structure)
+     * Insert a node (v2 structure) -- upserts if already exists.
      */
     private function insertNode(string $uuid, array $data, ?string $parentUuid): bool {
-        // Check if already exists
+        $separated = self::separateNodeFields($data);
+
         $existing = Database::queryOne(
-            "SELECT id FROM nodes WHERE uuid = ? AND user_id = ?",
+            "SELECT id, meta FROM nodes WHERE uuid = ? AND user_id = ?",
             [$uuid, $this->userId]
         );
 
         if ($existing) {
-            return false;
+            // Upsert: update the existing record
+            $cols = self::coreToColumns($separated['core'], false);
+            if ($parentUuid !== null || isset($data['parentId'])) {
+                $cols['parent_uuid'] = $parentUuid;
+            }
+            $cols['meta'] = self::mergeMeta($existing['meta'], $separated['meta']);
+            $cols['deleted_at'] = null;
+            if (!empty($cols)) {
+                Database::update('nodes', $cols, ['id' => $existing['id']]);
+            }
+            return true;
         }
 
-        Database::insert('nodes', [
-            'uuid' => $uuid,
-            'user_id' => $this->userId,
-            'parent_uuid' => $parentUuid,
-            'name' => $data['name'] ?? 'Unnamed',
-            'node_type' => $data['type'] ?? 'task',
-            'child_order' => isset($data['childOrder']) ? json_encode($data['childOrder']) : '[]',
-            'collapsed' => $data['collapsed'] ?? 0,
-            'status' => $data['status'] ?? 'new',
-            'priority' => $data['priority'] ?? 3,
-            'billable' => $data['billable'] ?? 1,
-            'estimate' => $data['estimate'] ?? null,
-            'due' => $data['due'] ?: null,
-            'starred' => $data['starred'] ?? 0,
-            'notes' => $data['notes'] ?? null,
-            'creation_date' => $data['creation_date'] ?? null,
-            'meta' => isset($data['meta']) ? json_encode($data['meta']) : null
-        ]);
+        $cols = self::coreToColumns($separated['core'], true);
+        $cols['uuid'] = $uuid;
+        $cols['user_id'] = $this->userId;
+        $cols['parent_uuid'] = $parentUuid;
+        $cols['meta'] = !empty($separated['meta']) ? json_encode($separated['meta']) : null;
+
+        Database::insert('nodes', $cols);
 
         // Update rootOrder if this is a root node
         if ($parentUuid === null) {
@@ -441,7 +519,7 @@ class Sync {
     }
 
     /**
-     * Insert a node session (v2 structure)
+     * Insert a node session (v2 structure) -- upserts if already exists.
      */
     private function insertNodeSession(string $uuid, array $data, ?string $nodeUuid): bool {
         if (!$nodeUuid) {
@@ -458,18 +536,22 @@ class Sync {
             [$uuid, $node['id']]
         );
 
-        if ($existing) {
-            return false;
-        }
-
-        Database::insert('node_sessions', [
-            'uuid' => $uuid,
-            'node_id' => $node['id'],
+        $fields = [
             'start_time' => $data['start_time'] ?? date('Y-m-d H:i:s'),
             'end_time' => $data['end_time'] ?? null,
             'notes' => $data['notes'] ?? null,
-            'meta' => isset($data['meta']) ? json_encode($data['meta']) : null
-        ]);
+            'meta' => isset($data['meta']) ? json_encode($data['meta']) : null,
+            'deleted_at' => null
+        ];
+
+        if ($existing) {
+            Database::update('node_sessions', $fields, ['id' => $existing['id']]);
+        } else {
+            Database::insert('node_sessions', array_merge($fields, [
+                'uuid' => $uuid,
+                'node_id' => $node['id']
+            ]));
+        }
 
         return true;
     }
@@ -484,24 +566,19 @@ class Sync {
             return false;
         }
 
+        $separated = self::separateNodeFields($data);
+
         $oldParentUuid = $existing['parent_uuid'];
         $newParentUuid = $data['parentId'] ?? $oldParentUuid;
 
-        $updates = [];
-        if (isset($data['name'])) $updates['name'] = $data['name'];
-        if (isset($data['type'])) $updates['node_type'] = $data['type'];
+        $updates = self::coreToColumns($separated['core'], false);
         if (isset($data['parentId'])) $updates['parent_uuid'] = $data['parentId'];
-        if (isset($data['childOrder'])) $updates['child_order'] = json_encode($data['childOrder']);
-        if (isset($data['collapsed'])) $updates['collapsed'] = $data['collapsed'];
-        if (isset($data['status'])) $updates['status'] = $data['status'];
-        if (isset($data['priority'])) $updates['priority'] = $data['priority'];
-        if (isset($data['billable'])) $updates['billable'] = $data['billable'];
-        if (isset($data['estimate'])) $updates['estimate'] = $data['estimate'];
-        if (isset($data['due'])) $updates['due'] = $data['due'] ?: null;
-        if (isset($data['starred'])) $updates['starred'] = $data['starred'];
-        if (isset($data['notes'])) $updates['notes'] = $data['notes'];
-        if (isset($data['creation_date'])) $updates['creation_date'] = $data['creation_date'];
-        if (isset($data['meta'])) $updates['meta'] = json_encode($data['meta']);
+
+        // Merge extra fields into meta
+        $mergedMeta = self::mergeMeta($existing['meta'], $separated['meta']);
+        if ($mergedMeta !== $existing['meta']) {
+            $updates['meta'] = $mergedMeta;
+        }
 
         if (empty($updates)) {
             return true;
@@ -856,7 +933,8 @@ class Sync {
                 'type' => $node['node_type'],
                 'parentId' => $node['parent_uuid'],
                 'childOrder' => json_decode($node['child_order'] ?? '[]', true) ?: [],
-                'collapsed' => (bool) $node['collapsed']
+                'collapsed' => (bool) $node['collapsed'],
+                'creation_date' => $node['creation_date'] ?? null
             ];
 
             // Include task-specific fields
@@ -883,6 +961,14 @@ class Sync {
                         'end_time' => $session['end_time'],
                         'notes' => $session['notes']
                     ];
+                }
+            }
+
+            // Merge meta fields back into output so client sees a flat object
+            if (!empty($node['meta'])) {
+                $meta = json_decode($node['meta'], true);
+                if (is_array($meta)) {
+                    $nodeData = array_merge($nodeData, $meta);
                 }
             }
 
@@ -1092,35 +1178,27 @@ class Sync {
      * Upsert a node (v2 structure)
      */
     private function upsertNode(string $uuid, array $data): void {
+        $separated = self::separateNodeFields($data);
+
         $existing = Database::queryOne(
-            "SELECT id FROM nodes WHERE uuid = ? AND user_id = ?",
+            "SELECT id, meta FROM nodes WHERE uuid = ? AND user_id = ?",
             [$uuid, $this->userId]
         );
 
-        $fields = [
-            'name' => $data['name'] ?? 'Unnamed',
-            'node_type' => $data['type'] ?? 'task',
-            'parent_uuid' => $data['parentId'] ?? null,
-            'child_order' => isset($data['childOrder']) ? json_encode($data['childOrder']) : '[]',
-            'collapsed' => $data['collapsed'] ?? 0,
-            'status' => $data['status'] ?? 'new',
-            'priority' => $data['priority'] ?? 3,
-            'billable' => $data['billable'] ?? 1,
-            'estimate' => $data['estimate'] ?? null,
-            'due' => ($data['due'] ?? null) ?: null,
-            'starred' => $data['starred'] ?? 0,
-            'notes' => $data['notes'] ?? null,
-            'creation_date' => $data['creation_date'] ?? null,
-            'deleted_at' => null
-        ];
-
         if ($existing) {
+            $fields = self::coreToColumns($separated['core'], false);
+            if (isset($data['parentId'])) $fields['parent_uuid'] = $data['parentId'];
+            $fields['meta'] = self::mergeMeta($existing['meta'], $separated['meta']);
+            $fields['deleted_at'] = null;
             Database::update('nodes', $fields, ['id' => $existing['id']]);
         } else {
-            Database::insert('nodes', array_merge($fields, [
-                'uuid' => $uuid,
-                'user_id' => $this->userId
-            ]));
+            $fields = self::coreToColumns($separated['core'], true);
+            $fields['uuid'] = $uuid;
+            $fields['user_id'] = $this->userId;
+            $fields['parent_uuid'] = $data['parentId'] ?? null;
+            $fields['meta'] = !empty($separated['meta']) ? json_encode($separated['meta']) : null;
+            $fields['deleted_at'] = null;
+            Database::insert('nodes', $fields);
         }
     }
 
@@ -1316,6 +1394,14 @@ class Sync {
             $data['due'] = $node['due'];
             $data['starred'] = (string) $node['starred'];
             $data['notes'] = $node['notes'];
+        }
+
+        // Merge meta fields back into output so client sees a flat object
+        if (!empty($node['meta'])) {
+            $meta = json_decode($node['meta'], true);
+            if (is_array($meta)) {
+                $data = array_merge($data, $meta);
+            }
         }
 
         return $data;
