@@ -11,11 +11,13 @@ require_once __DIR__ . '/lib/Database.php';
 require_once __DIR__ . '/lib/Response.php';
 require_once __DIR__ . '/lib/Auth.php';
 require_once __DIR__ . '/lib/Sync.php';
+require_once __DIR__ . '/lib/Share.php';
 
 // Load API handlers
 require_once __DIR__ . '/api/auth.php';
 require_once __DIR__ . '/api/sync.php';
 require_once __DIR__ . '/api/settings.php';
+require_once __DIR__ . '/api/share.php';
 
 // Set up CORS
 Response::cors();
@@ -61,6 +63,16 @@ function route(string $method, string $uri): void {
         // Settings routes
         'GET /api/settings' => 'handleGetSettings',
         'PUT /api/settings' => 'handleUpdateSettings',
+
+        // Share routes (owner)
+        'POST /api/shares' => 'handleCreateShare',
+        'GET /api/shares' => 'handleListShares',
+    ];
+
+    // Routes with a path parameter, matched by regex; capture is passed to the handler
+    $patternRoutes = [
+        ['GET', '#^/api/share/([a-f0-9]{64})$#', 'handlePublicShare'],
+        ['DELETE', '#^/api/shares/(\d+)$#', 'handleRevokeShare'],
     ];
 
     $routeKey = "$method $uri";
@@ -81,6 +93,14 @@ function route(string $method, string $uri): void {
         return;
     }
 
+    // Check pattern routes
+    foreach ($patternRoutes as $route) {
+        if ($method === $route[0] && preg_match($route[1], $altUri, $matches)) {
+            $route[2]($matches[1]);
+            return;
+        }
+    }
+
     // Root path - show API info
     if ($uri === '/' || $uri === '') {
         Response::success([
@@ -96,6 +116,10 @@ function route(string $method, string $uri): void {
                 'GET /api/sync/full' => 'Download full data',
                 'GET /api/settings' => 'Get user settings',
                 'PUT /api/settings' => 'Update user settings',
+                'POST /api/shares' => 'Create a read-only share link',
+                'GET /api/shares' => 'List your share links',
+                'DELETE /api/shares/{id}' => 'Revoke a share link',
+                'GET /api/share/{token}' => 'Public share payload',
             ]
         ]);
         return;

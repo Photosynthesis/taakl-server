@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Shared tasks — Taakl</title>
+  <link rel="stylesheet" href="share.css">
+</head>
+<body>
+  <div class="share-page">
+    <div class="share-topbar">
+      <span class="share-brand">Taakl</span>
+      <span class="share-readonly-badge">read-only share</span>
+    </div>
+
+    <div id="share-loading" class="share-message">Loading&hellip;</div>
+
+    <div id="share-error" class="share-message" style="display:none">
+      This link is invalid or has been turned off.
+    </div>
+
+    <div id="share-content" style="display:none">
+      <div id="share-header"></div>
+
+      <div class="share-controls">
+        <input type="text" id="share-search" placeholder="Filter&hellip;" autocomplete="off">
+        <label class="share-hide-done"><input type="checkbox" id="share-hide-done" checked> Hide done</label>
+      </div>
+      <div class="share-chips" id="share-chips">
+        <button class="share-chip active" data-preset="">All</button>
+        <button class="share-chip" data-preset="today">Today</button>
+        <button class="share-chip" data-preset="yesterday">Yesterday</button>
+        <button class="share-chip" data-preset="week">This Week</button>
+        <button class="share-chip" data-preset="lastweek">Last Week</button>
+        <button class="share-chip" data-preset="month">This Month</button>
+      </div>
+
+      <div id="share-tree" class="share-tree"></div>
+      <div id="share-tree-empty" class="share-message" style="display:none">Nothing matches the current filters.</div>
+    </div>
+  </div>
+
+  <script src="share.js"></script>
+</body>
+</html>
