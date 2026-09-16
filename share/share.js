@@ -14,7 +14,8 @@
  *   rollupTime()            -> calculateNodeTime
  *   prettyTime()            -> prettyTime
  *   renderNode() filters    -> treeView.renderNode (hide-done -> search -> recent;
- *                              leaf completed tasks only; force-expand while filtering)
+ *                              hide-done hides completed tasks AND completed
+ *                              parents (whole subtree); force-expand while filtering)
  */
 (function () {
   'use strict';
@@ -195,7 +196,8 @@
     var isCompleted = n.status === 'completed';
 
     // Same skip order as the client: hide-done, then search, then recent
-    if (state.hideCompleted && isTask && isCompleted) return;
+    // (a completed parent hides its whole subtree, matching the client)
+    if (state.hideCompleted && isCompleted) return;
     if (state.searchMatchIds && !state.searchMatchIds[id]) return;
     if (state.recentMatchIds && !state.recentMatchIds[id]) return;
 
