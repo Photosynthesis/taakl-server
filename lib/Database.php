@@ -18,6 +18,11 @@ class Database {
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::ATTR_EMULATE_PREPARES => false,
+                // The shared host's MySQL runs on US Pacific time; the sync
+                // protocol is UTC end-to-end. Without this, auto-stamped
+                // updated_at values lag UTC cursors by 7-8 hours and
+                // incremental pulls go blind to recent changes.
+                PDO::MYSQL_ATTR_INIT_COMMAND => "SET time_zone = '+00:00'",
             ]);
         }
 

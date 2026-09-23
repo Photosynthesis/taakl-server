@@ -100,6 +100,7 @@ class Sync {
 
         try {
             // Process incoming changes
+            $rejected = [];
             foreach ($changes as $change) {
                 $stats['processed']++;
                 $result = $this->processChange($change);
@@ -107,12 +108,24 @@ class Sync {
                     $stats['accepted']++;
                 } else {
                     $stats['conflicts']++;
+                    $rejected[] = $change;
                 }
             }
 
             // Get server changes since last sync
             if ($lastSyncTime) {
                 $serverChanges = $this->getChangesSince($lastSyncTime);
+            }
+
+            // Echo the winning row for each rejected v2 change so the losing
+            // device converges to the server state instead of keeping its
+            // local version forever (the winning row may be older than the
+            // device's pull cursor and would otherwise never be re-delivered)
+            foreach ($rejected as $change) {
+                $echo = $this->currentRowAsChange($change['type'] ?? '', $change['uuid'] ?? '');
+                if ($echo) {
+                    $serverChanges[] = $echo;
+                }
             }
 
             Database::commit();
@@ -136,6 +149,44 @@ class Sync {
     }
 
     /**
+     * Format the current server state of a v2 record as a change entry
+     * (used to echo the winning row back after a rejected change).
+     * Returns null for v1 types or records that don't exist.
+     */
+    private function currentRowAsChange(string $type, string $uuid): ?array {
+        if (!$uuid) {
+            return null;
+        }
+
+        if ($type === 'node') {
+            $node = $this->getNodeByUuid($uuid);
+            if (!$node) return null;
+            return [
+                'action' => $node['deleted_at'] ? 'delete' : 'update',
+                'type' => 'node',
+                'uuid' => $node['uuid'],
+                'parentUuid' => $node['parent_uuid'],
+                'data' => $this->formatNodeData($node)
+            ];
+        }
+
+        if ($type === 'node_session') {
+            $session = $this->getNodeSessionByUuid($uuid);
+            if (!$session) return null;
+            $node = Database::queryOne("SELECT uuid FROM nodes WHERE id = ?", [$session['node_id']]);
+            return [
+                'action' => $session['deleted_at'] ? 'delete' : 'update',
+                'type' => 'node_session',
+                'uuid' => $session['uuid'],
+                'parentUuid' => $node['uuid'] ?? null,
+                'data' => $this->formatNodeSessionData($session)
+            ];
+        }
+
+        return null;
+    }
+
+    /**
      * Process a single change
      */
     private function processChange(array $change): bool {
@@ -152,7 +203,7 @@ class Sync {
 
         switch ($action) {
             case 'insert':
-                return $this->handleInsert($type, $uuid, $data, $parentUuid);
+                return $this->handleInsert($type, $uuid, $data, $parentUuid, $timestamp);
             case 'update':
                 return $this->handleUpdate($type, $uuid, $data, $timestamp);
             case 'delete':
@@ -165,7 +216,7 @@ class Sync {
     /**
      * Handle insert action
      */
-    private function handleInsert(string $type, string $uuid, array $data, ?string $parentUuid): bool {
+    private function handleInsert(string $type, string $uuid, array $data, ?string $parentUuid, ?string $timestamp = null): bool {
         switch ($type) {
             case 'client':
                 return $this->insertClient($uuid, $data);
@@ -177,9 +228,9 @@ class Sync {
                 return $this->insertSession($uuid, $data, $parentUuid);
             // v2 node types
             case 'node':
-                return $this->insertNode($uuid, $data, $parentUuid);
+                return $this->insertNode($uuid, $data, $parentUuid, $timestamp);
             case 'node_session':
-                return $this->insertNodeSession($uuid, $data, $parentUuid);
+                return $this->insertNodeSession($uuid, $data, $parentUuid, $timestamp);
             default:
                 return false;
         }
@@ -223,16 +274,18 @@ class Sync {
             return false;
         }
 
-        // Only delete if client timestamp is newer
-        if ($existing['updated_at'] > $timestamp && $existing['deleted_at'] === null) {
+        // Only delete if client timestamp is newer (action-time LWW for v2;
+        // legacy rows and v1 types fall back to updated_at)
+        $lastAction = $existing['client_updated_at'] ?? $existing['updated_at'] ?? null;
+        if ($lastAction > $timestamp && $existing['deleted_at'] === null) {
             return false;
         }
 
         // For v2 node types, use different query (uuid is unique per user)
         if ($type === 'node' || $type === 'node_session') {
             Database::execute(
-                "UPDATE {$table} SET deleted_at = ? WHERE id = ?",
-                [$timestamp, $existing['id']]
+                "UPDATE {$table} SET deleted_at = ?, client_updated_at = ? WHERE id = ?",
+                [$timestamp, $timestamp, $existing['id']]
             );
         } else {
             Database::execute(
@@ -483,7 +536,7 @@ class Sync {
     /**
      * Insert a node (v2 structure) -- upserts if already exists.
      */
-    private function insertNode(string $uuid, array $data, ?string $parentUuid): bool {
+    private function insertNode(string $uuid, array $data, ?string $parentUuid, ?string $timestamp = null): bool {
         $separated = self::separateNodeFields($data);
 
         $existing = Database::queryOne(
@@ -499,6 +552,7 @@ class Sync {
             }
             $cols['meta'] = self::mergeMeta($existing['meta'], $separated['meta']);
             $cols['deleted_at'] = null;
+            if ($timestamp) $cols['client_updated_at'] = $timestamp;
             if (!empty($cols)) {
                 Database::update('nodes', $cols, ['id' => $existing['id']]);
             }
@@ -510,6 +564,7 @@ class Sync {
         $cols['user_id'] = $this->userId;
         $cols['parent_uuid'] = $parentUuid;
         $cols['meta'] = !empty($separated['meta']) ? json_encode($separated['meta']) : null;
+        if ($timestamp) $cols['client_updated_at'] = $timestamp;
 
         Database::insert('nodes', $cols);
 
@@ -524,7 +579,7 @@ class Sync {
     /**
      * Insert a node session (v2 structure) -- upserts if already exists.
      */
-    private function insertNodeSession(string $uuid, array $data, ?string $nodeUuid): bool {
+    private function insertNodeSession(string $uuid, array $data, ?string $nodeUuid, ?string $timestamp = null): bool {
         if (!$nodeUuid) {
             return false;
         }
@@ -546,6 +601,7 @@ class Sync {
             'meta' => isset($data['meta']) ? json_encode($data['meta']) : null,
             'deleted_at' => null
         ];
+        if ($timestamp) $fields['client_updated_at'] = $timestamp;
 
         if ($existing) {
             Database::update('node_sessions', $fields, ['id' => $existing['id']]);
@@ -565,7 +621,15 @@ class Sync {
     private function updateNodeRecord(string $uuid, array $data, string $timestamp): bool {
         $existing = $this->getNodeByUuid($uuid);
 
-        if (!$existing || ($existing['updated_at'] > $timestamp && $existing['deleted_at'] === null)) {
+        if (!$existing) {
+            return false;
+        }
+
+        // True LWW: compare the client's action time against the stored action
+        // time, not against updated_at (the server's write-receipt time).
+        // Legacy rows without client_updated_at fall back to updated_at.
+        $lastAction = $existing['client_updated_at'] ?? $existing['updated_at'];
+        if ($lastAction > $timestamp && $existing['deleted_at'] === null) {
             return false;
         }
 
@@ -575,6 +639,7 @@ class Sync {
         $newParentUuid = $data['parentId'] ?? $oldParentUuid;
 
         $updates = self::coreToColumns($separated['core'], false);
+        $updates['client_updated_at'] = $timestamp;
         if (isset($data['parentId'])) $updates['parent_uuid'] = $data['parentId'];
 
         // Merge extra fields into meta
@@ -609,19 +674,21 @@ class Sync {
     private function updateNodeSession(string $uuid, array $data, string $timestamp): bool {
         $existing = $this->getNodeSessionByUuid($uuid);
 
-        if (!$existing || ($existing['updated_at'] > $timestamp && $existing['deleted_at'] === null)) {
+        if (!$existing) {
             return false;
         }
 
-        $updates = [];
+        // True LWW by client action time (see updateNodeRecord)
+        $lastAction = $existing['client_updated_at'] ?? $existing['updated_at'];
+        if ($lastAction > $timestamp && $existing['deleted_at'] === null) {
+            return false;
+        }
+
+        $updates = ['client_updated_at' => $timestamp];
         if (isset($data['start_time'])) $updates['start_time'] = $data['start_time'];
         if (isset($data['end_time'])) $updates['end_time'] = $data['end_time'];
         if (isset($data['notes'])) $updates['notes'] = $data['notes'];
         if (isset($data['meta'])) $updates['meta'] = json_encode($data['meta']);
-
-        if (empty($updates)) {
-            return true;
-        }
 
         Database::update('node_sessions', $updates, ['id' => $existing['id']]);
         return true;

@@ -289,7 +289,19 @@ Defined keys:
 `globalState` in the response is the full map after last-write-wins merge
 (`{}` if the user has no global state yet).
 
-**Conflict Resolution:** Last-write-wins based on timestamp. The server accepts a client change only if the client's timestamp >= the server's `updated_at` for that record. Conflicts are counted in `stats.conflicts` but rejected changes are not returned in detail.
+**Conflict Resolution:** Last-write-wins by client action time. For v2 records
+the server accepts a change only if its `timestamp` (client-stamped UTC action
+time) >= the record's stored `client_updated_at` (falling back to `updated_at`
+for legacy rows that predate migration 006). Rejections are counted in
+`stats.conflicts`, and for v2 types the **winning row's current state is
+appended to the response `changes`** so the losing device converges instead of
+silently keeping its local version.
+
+**Timezones:** every connection runs `SET time_zone = '+00:00'` (the shared
+host's MySQL otherwise stamps `updated_at` in US Pacific time, which broke
+`getChangesSince` — UTC cursors compared against PDT row stamps made recent
+changes invisible to incremental pulls for ~7 hours). All timestamps in the
+protocol and the database are UTC.
 
 ---
 
@@ -610,7 +622,8 @@ It reads the token from the URL fragment and calls this endpoint.
 | password_hash | VARCHAR(255) | bcrypt |
 | email | VARCHAR(255) | Optional |
 | created_at | DATETIME | |
-| updated_at | DATETIME | |
+| updated_at | DATETIME | Server write-receipt time |
+| client_updated_at | DATETIME | Client-stamped UTC action time; drives LWW (NULL on legacy rows) |
 
 ### Auth Tokens
 
@@ -644,7 +657,8 @@ It reads the token from the URL fragment and calls this endpoint.
 | meta | JSON | Nullable, arbitrary metadata |
 | deleted_at | DATETIME | Soft delete |
 | created_at | DATETIME | |
-| updated_at | DATETIME | |
+| updated_at | DATETIME | Server write-receipt time |
+| client_updated_at | DATETIME | Client-stamped UTC action time; drives LWW (NULL on legacy rows) |
 
 ### Node Sessions (v2)
 
@@ -658,7 +672,8 @@ It reads the token from the URL fragment and calls this endpoint.
 | meta | JSON | Nullable |
 | deleted_at | DATETIME | Soft delete |
 | created_at | DATETIME | |
-| updated_at | DATETIME | |
+| updated_at | DATETIME | Server write-receipt time |
+| client_updated_at | DATETIME | Client-stamped UTC action time; drives LWW (NULL on legacy rows) |
 
 ### User Data Meta
 
@@ -762,6 +777,7 @@ Timezone is set to UTC server-wide.
 | `003_add_creation_date.sql` | Adds `creation_date` column to nodes |
 | `004_shares.sql` | Read-only share links (shares table) |
 | `005_user_global_state.sql` | user_global_state table: account-global synced state (LWW per key); first key is the running-session `tracking` pointer |
+| `006_client_timestamps.sql` | `client_updated_at` on nodes/node_sessions: LWW by client action time instead of server write-receipt time |
 
 ---
 
