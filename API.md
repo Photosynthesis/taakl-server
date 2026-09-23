@@ -193,7 +193,11 @@ Incremental sync — push client changes and pull server changes since `lastSync
 }
 ```
 
-`lastSyncTime` can be `null` for the first sync. `timestamp` defaults to current server time if omitted.
+`lastSyncTime` can be `null` for the first sync (no changes are returned). The
+current client bootstraps a fresh device by sending `"1970-01-01 00:00:00"`,
+which returns the entire account as ordinary changes — this endpoint is the
+**only** sync flow the current client uses. `timestamp` defaults to current
+server time if omitted.
 
 `globalState` (optional) is the **account-global state map**: key-value state
 that roams across devices, stored in `user_global_state`. Unlike `settings`
@@ -291,6 +295,9 @@ Defined keys:
 
 ### POST /api/sync/full
 
+**Deprecated** — kept for old clients in the field and as a manual import
+escape hatch; the current client never calls it.
+
 Full sync upload — replace all server data with complete client dataset.
 
 **Authentication:** Required
@@ -360,6 +367,10 @@ Must have either `clients` (v1) or `nodes` (v2) or both. Uses upsert logic — s
 ---
 
 ### GET /api/sync/full
+
+**Deprecated** — kept for old clients in the field and as a manual export
+escape hatch; the current client bootstraps via `POST /api/sync` with an
+epoch `lastSyncTime` instead.
 
 Full sync download — retrieve complete server dataset.
 
