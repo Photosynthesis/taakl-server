@@ -92,7 +92,7 @@ class Sync {
     /**
      * Process incremental sync
      */
-    public function processSync(array $changes, ?string $lastSyncTime): array {
+    public function processSync(array $changes, ?string $lastSyncTime, ?array $globalState = null): array {
         $stats = ['processed' => 0, 'accepted' => 0, 'conflicts' => 0];
         $serverChanges = [];
 
@@ -121,6 +121,8 @@ class Sync {
             throw $e;
         }
 
+        $globalStateOut = $this->mergeGlobalState($globalState);
+
         // Get current rootOrder to return to client
         $meta = $this->getUserDataMeta();
 
@@ -128,6 +130,7 @@ class Sync {
             'serverTime' => date('Y-m-d H:i:s'),
             'changes' => $serverChanges,
             'rootOrder' => $meta['root_order'],
+            'globalState' => $globalStateOut,
             'stats' => array_merge($stats, ['returned' => count($serverChanges)])
         ];
     }
@@ -674,6 +677,74 @@ class Sync {
     }
 
     /**
+     * Get the full account-global state map.
+     * Each entry: ['value' => mixed, 'updated_at' => client-stamped UTC].
+     */
+    public function getGlobalState(): array {
+        $state = [];
+        $rows = Database::query(
+            "SELECT state_key, state_value, client_updated_at FROM user_global_state WHERE user_id = ?",
+            [$this->userId]
+        );
+
+        foreach ($rows as $row) {
+            $state[$row['state_key']] = [
+                'value' => json_decode($row['state_value'] ?? 'null', true),
+                'updated_at' => $row['client_updated_at']
+            ];
+        }
+
+        return $state;
+    }
+
+    /**
+     * Merge incoming account-global state, last-write-wins per key by the
+     * client-stamped updated_at. Entries without a timestamp are ignored.
+     * Returns the full current map after the merge.
+     */
+    public function mergeGlobalState(?array $incoming): array {
+        $current = $this->getGlobalState();
+
+        if (!is_array($incoming)) {
+            return $current;
+        }
+
+        foreach ($incoming as $key => $entry) {
+            if (!is_string($key) || $key === '' || strlen($key) > 100) continue;
+            if (!is_array($entry) || empty($entry['updated_at']) || !is_string($entry['updated_at'])) continue;
+
+            $existing = $current[$key] ?? null;
+            if ($existing && $existing['updated_at'] >= $entry['updated_at']) continue;
+
+            $row = [
+                'state_value' => json_encode($entry['value'] ?? null),
+                'client_updated_at' => $entry['updated_at']
+            ];
+
+            $found = Database::queryOne(
+                "SELECT id FROM user_global_state WHERE user_id = ? AND state_key = ?",
+                [$this->userId, $key]
+            );
+
+            if ($found) {
+                Database::update('user_global_state', $row, ['id' => $found['id']]);
+            } else {
+                Database::insert('user_global_state', array_merge($row, [
+                    'user_id' => $this->userId,
+                    'state_key' => $key
+                ]));
+            }
+
+            $current[$key] = [
+                'value' => $entry['value'] ?? null,
+                'updated_at' => $entry['updated_at']
+            ];
+        }
+
+        return $current;
+    }
+
+    /**
      * Save user data meta
      */
     private function saveUserDataMeta(int $dataVersion, array $rootOrder): void {
@@ -850,6 +921,7 @@ class Sync {
             'clients' => [],
             'nodes' => [],
             'rootOrder' => $meta['root_order'],
+            'globalState' => $this->getGlobalState(),
             'settings' => $this->getSettings()
         ];
 
@@ -1033,6 +1105,11 @@ class Sync {
             $dataVersion = $data['dataVersion'] ?? 2;
             $rootOrder = $data['rootOrder'] ?? [];
             $this->saveUserDataMeta($dataVersion, $rootOrder);
+
+            // Global state rides along in full uploads (LWW per key, may be absent)
+            if (isset($data['globalState']) && is_array($data['globalState'])) {
+                $this->mergeGlobalState($data['globalState']);
+            }
 
             // Process settings
             if (isset($data['settings'])) {

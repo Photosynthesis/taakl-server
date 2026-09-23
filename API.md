@@ -183,11 +183,31 @@ Incremental sync — push client changes and pull server changes since `lastSync
       "timestamp": "2024-01-15 10:31:00",
       "parentUuid": "parent-node-id"
     }
-  ]
+  ],
+  "globalState": {
+    "tracking": {
+      "value": { "nodeId": "node-uuid or null", "sessionId": "session-uuid or null" },
+      "updated_at": "2024-01-15 10:31:00"
+    }
+  }
 }
 ```
 
 `lastSyncTime` can be `null` for the first sync. `timestamp` defaults to current server time if omitted.
+
+`globalState` (optional) is the **account-global state map**: key-value state
+that roams across devices, stored in `user_global_state`. Unlike `settings`
+(device-local-wins), each entry is merged **last-write-wins** by its
+client-stamped UTC `updated_at`; entries without a timestamp are ignored, and
+omitting the map leaves stored state untouched. The full post-merge map is
+returned in every response. Adding a new key requires no server change.
+`changes: []` with a `lastSyncTime` is a valid "poll-only" request.
+
+Defined keys:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `tracking` | `{ "nodeId", "sessionId" }` | Running-session pointer. Set when a timer starts; both ids `null` (with a fresh `updated_at`) when it stops. This is how a session started on one device shows up as running on another. |
 
 #### Change Types
 
@@ -246,6 +266,12 @@ Incremental sync — push client changes and pull server changes since `lastSync
     }
   ],
   "rootOrder": ["uuid1", "uuid2"],
+  "globalState": {
+    "tracking": {
+      "value": { "nodeId": "node-uuid or null", "sessionId": "session-uuid or null" },
+      "updated_at": "2024-01-15 10:31:00"
+    }
+  },
   "stats": {
     "processed": 5,
     "accepted": 4,
@@ -254,6 +280,9 @@ Incremental sync — push client changes and pull server changes since `lastSync
   }
 }
 ```
+
+`globalState` in the response is the full map after last-write-wins merge
+(`{}` if the user has no global state yet).
 
 **Conflict Resolution:** Last-write-wins based on timestamp. The server accepts a client change only if the client's timestamp >= the server's `updated_at` for that record. Conflicts are counted in `stats.conflicts` but rejected changes are not returned in detail.
 
@@ -298,6 +327,9 @@ Full sync upload — replace all server data with complete client dataset.
       }
     },
     "rootOrder": ["node-uuid-1", "node-uuid-2"],
+    "globalState": {
+      "tracking": { "value": { "nodeId": null, "sessionId": null }, "updated_at": "2024-01-15 11:30:00" }
+    },
     "clients": { },
     "settings": {
       "key": "value"
@@ -306,7 +338,7 @@ Full sync upload — replace all server data with complete client dataset.
 }
 ```
 
-Must have either `clients` (v1) or `nodes` (v2) or both. Uses upsert logic — safe to run multiple times.
+Must have either `clients` (v1) or `nodes` (v2) or both. Uses upsert logic — safe to run multiple times. `globalState` (optional) is merged last-write-wins per key like in `POST /api/sync`.
 
 **Response (200):**
 ```json
@@ -360,12 +392,16 @@ Full sync download — retrieve complete server dataset.
       }
     },
     "rootOrder": ["node-uuid-1"],
+    "globalState": {
+      "tracking": { "value": { "nodeId": "node-uuid", "sessionId": "session-uuid" }, "updated_at": "2024-01-15 10:00:00" }
+    },
     "settings": { }
   }
 }
 ```
 
-Only non-deleted records are returned.
+Only non-deleted records are returned. `globalState` is the account-global state
+map (see `POST /api/sync`); `{}` if the user has none.
 
 ---
 
@@ -633,6 +669,21 @@ It reads the token from the URL fragment and calls this endpoint.
 
 Unique constraint on `(user_id, setting_key)`.
 
+### User Global State
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INT | Primary key |
+| user_id | INT | FK to users |
+| state_key | VARCHAR(100) | e.g. `tracking` |
+| state_value | JSON | The entry's value |
+| client_updated_at | DATETIME | Client-stamped UTC; drives LWW merge |
+| updated_at | DATETIME | Server write time |
+
+Unique constraint on `(user_id, state_key)`. Account-global state that roams
+across devices (see `globalState` in `POST /api/sync`). Settings are
+device-local-wins; global state is last-write-wins per key.
+
 ### Shares
 
 | Column | Type | Notes |
@@ -698,6 +749,7 @@ Timezone is set to UTC server-wide.
 | `002_nodes.sql` | V2 schema: nodes, node_sessions, user_data_meta |
 | `003_add_creation_date.sql` | Adds `creation_date` column to nodes |
 | `004_shares.sql` | Read-only share links (shares table) |
+| `005_user_global_state.sql` | user_global_state table: account-global synced state (LWW per key); first key is the running-session `tracking` pointer |
 
 ---
 

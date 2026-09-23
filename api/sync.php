@@ -13,9 +13,10 @@ function handleSync(): void {
 
     $lastSyncTime = $data['lastSyncTime'] ?? null;
     $changes = $data['changes'] ?? [];
+    $globalState = is_array($data['globalState'] ?? null) ? $data['globalState'] : null;
 
     $sync = new Sync($user['id'], $user['uuid']);
-    $result = $sync->processSync($changes, $lastSyncTime);
+    $result = $sync->processSync($changes, $lastSyncTime, $globalState);
 
     Response::success($result);
 }
