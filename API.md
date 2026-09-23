@@ -208,6 +208,7 @@ Defined keys:
 | Key | Value | Meaning |
 |-----|-------|---------|
 | `tracking` | `{ "nodeId", "sessionId" }` | Running-session pointer. Set when a timer starts; both ids `null` (with a fresh `updated_at`) when it stops. This is how a session started on one device shows up as running on another. |
+| `todayStarredOrder` | `["node-uuid", ...]` | Manual ordering of the starred section in the Today view. |
 
 #### Change Types
 
